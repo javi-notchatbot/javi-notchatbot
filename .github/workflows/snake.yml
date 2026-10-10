@@ -26,25 +26,157 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Static image of the grid, without the snake (first frame of the GIF)
-      - name: Build static grid without snake
+      # Contribution grid (light + dark) with a mini capybara hopping on top
+      - name: Build capybara GIFs
+        env:
+          GH_USER: ${{ github.repository_owner }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           sudo chown -R $(id -u) dist
           pip install --quiet pillow
           python3 - <<'PY'
-          from PIL import Image
-          im = Image.open("dist/github-contribution-grid-snake.gif"); im.seek(0)
-          im = im.convert("RGB"); px = im.load(); w, h = im.size
-          bg = px[w - 1, h - 1]
-          diff = lambda p: max(abs(a - b) for a, b in zip(p, bg)) > 12
-          rows = [y for y in range(h) if sum(diff(px[x, y]) for x in range(w)) > w * 0.5]
-          top, bottom = rows[0], rows[-1]
-          cols = [x for x in range(w) if any(diff(px[x, y]) for y in range(top, bottom + 1))]
-          grid = im.crop((cols[0], top, cols[-1] + 1, bottom + 1))
-          m = 6
-          out = Image.new("RGB", (grid.width + 2 * m, grid.height + 2 * m), bg)
-          out.paste(grid, (m, m))
-          out.save("dist/github-contribution-grid.png")
+          # Draws the contribution grid (light + dark) with a mini capybara hopping on top.
+          # Data comes from the GitHub GraphQL API (includes private contributions if the
+          # profile shows them). Outputs to dist/.
+          import json, math, os, urllib.request
+          from PIL import Image, ImageDraw
+
+          USER = os.environ.get("GH_USER", "")
+          TOKEN = os.environ.get("GITHUB_TOKEN", "")
+          LEVEL = {"NONE": 0, "FIRST_QUARTILE": 1, "SECOND_QUARTILE": 2, "THIRD_QUARTILE": 3, "FOURTH_QUARTILE": 4}
+
+          def fetch_weeks():
+              if os.environ.get("LEVELS_FILE"):          # local testing
+                  return json.load(open(os.environ["LEVELS_FILE"]))
+              q = """query($login:String!){user(login:$login){contributionsCollection{contributionCalendar{
+                     weeks{contributionDays{weekday contributionLevel}}}}}}"""
+              req = urllib.request.Request("https://api.github.com/graphql",
+                  data=json.dumps({"query": q, "variables": {"login": USER}}).encode(),
+                  headers={"Authorization": f"bearer {TOKEN}", "Content-Type": "application/json"})
+              data = json.load(urllib.request.urlopen(req))
+              if "errors" in data:
+                  raise SystemExit(data["errors"])
+              weeks = []
+              for w in data["data"]["user"]["contributionsCollection"]["contributionCalendar"]["weeks"]:
+                  col = [None] * 7
+                  for d in w["contributionDays"]:
+                      col[d["weekday"]] = LEVEL[d["contributionLevel"]]
+                  weeks.append(col)
+              return weeks
+
+          THEMES = {
+              "light": {"bg": "#ffffff", "cells": ["#ebedf0", "#9be9a8", "#40c463", "#30a14e", "#216e39"],
+                        "shadow": "#d0d7de"},
+              "dark":  {"bg": "#0d1117", "cells": ["#161b22", "#0e4429", "#006d32", "#26a641", "#39d353"],
+                        "shadow": "#010409"},
+          }
+          K = 4                       # supersampling factor for smooth edges
+          CELL, GAP, PAD = 11, 3, 8   # final px
+          PITCH = CELL + GAP
+
+          def hexrgb(h): return tuple(int(h[i:i + 2], 16) for i in (1, 3, 5))
+
+          # ---------- capybara (drawn with shapes, facing right) ----------
+          FUR, FUR_D, FUR_L, NOSE, EYE = "#a5703f", "#7b4f2a", "#b98551", "#4a2f1b", "#1b1b1b"
+          SW, SH = 42, 30             # sprite box in final px (drawn in a 34x24 unit grid)
+
+          def capybara(pose):
+              """pose: 'stand' | 'jump' | 'land'"""
+              s = K * SW / 34
+              img = Image.new("RGBA", (round(34 * s), round(24 * s)), (0, 0, 0, 0))
+              d = ImageDraw.Draw(img)
+              R = lambda *b: [v * s for v in b]
+              sq = 1.5 if pose == "land" else 0          # squash on landing
+              leg_top, leg_bot = 17, 23
+              if pose == "jump":                         # legs stretched backwards/forwards
+                  d.rounded_rectangle(R(2, 15, 7, 20), radius=2 * s, fill=FUR_D)
+                  d.rounded_rectangle(R(7, 16, 11, 22), radius=2 * s, fill=FUR_D)
+                  d.rounded_rectangle(R(19, 16, 23, 22), radius=2 * s, fill=FUR_D)
+                  d.rounded_rectangle(R(24, 15, 29, 20), radius=2 * s, fill=FUR_D)
+              else:
+                  for x in (4, 9, 19, 24):
+                      d.rounded_rectangle(R(x, leg_top, x + 4, leg_bot), radius=2 * s, fill=FUR_D)
+              # body: chunky barrel
+              d.ellipse(R(1, 5 + sq, 27, 20), fill=FUR)
+              d.ellipse(R(4, 5 + sq, 22, 11 + sq), fill=FUR_L)          # back highlight
+              # head: big, boxy, blunt snout
+              d.rounded_rectangle(R(18, 3 + sq, 33, 15), radius=5 * s, fill=FUR)
+              d.rounded_rectangle(R(27, 6 + sq, 33.5, 15), radius=3.5 * s, fill=FUR_D)   # muzzle
+              d.ellipse(R(30.5, 7.5 + sq, 32.5, 9.5 + sq), fill=NOSE)                   # nostril
+              d.line(R(29, 13, 32.5, 13), fill=NOSE, width=max(1, round(s / 2)))             # mouth
+              d.ellipse(R(19.5, 1 + sq, 23, 5 + sq), fill=FUR_D)                         # ear
+              d.ellipse(R(24, 6 + sq, 26.4, 8.4 + sq), fill=EYE)                         # eye
+              d.ellipse(R(24.6, 6.4 + sq, 25.3, 7.1 + sq), fill="#ffffff")               # eye shine
+              return img.resize((SW, SH), Image.LANCZOS)
+
+          POSES = {p: capybara(p) for p in ("stand", "jump", "land")}
+          POSES_L = {p: im.transpose(Image.FLIP_LEFT_RIGHT) for p, im in POSES.items()}
+
+          def render(weeks, theme, out_png, out_gif):
+              t = THEMES[theme]
+              HOP_H = 14
+              top_room = SH + HOP_H + 4
+              W = PAD * 2 + len(weeks) * PITCH - GAP
+              H = top_room + PAD + 7 * PITCH - GAP + PAD
+              big = Image.new("RGB", (W * K, H * K), t["bg"])
+              d = ImageDraw.Draw(big)
+              y0 = top_room + PAD
+              for c, col in enumerate(weeks):
+                  for r, lv in enumerate(col):
+                      if lv is None:
+                          continue
+                      x, y = PAD + c * PITCH, y0 + r * PITCH
+                      d.rounded_rectangle([x * K, y * K, (x + CELL) * K - 1, (y + CELL) * K - 1],
+                                          radius=2 * K, fill=t["cells"][lv])
+              base = big.resize((W, H), Image.LANCZOS)
+              base.crop((0, top_room, W, H)).save(out_png)
+
+              ground = y0 - 1                            # feet touch the top of the grid
+              x0, x1 = PAD, W - PAD - SW
+              HOP_W, HOP_F = 36, 14
+              frames = []
+
+              def put(fr, sprite, x, y):
+                  fr.paste(sprite, (x, y), sprite)
+
+              def run(left):
+                  n = max(1, round((x1 - x0) / HOP_W))
+                  poses = POSES_L if left else POSES
+                  for i in range(n):
+                      for f in range(HOP_F):
+                          p = f / HOP_F
+                          pos = x0 + (x1 - x0) * (i + p) / n
+                          x = round(x1 - (pos - x0)) if left else round(pos)
+                          lift = HOP_H * math.sin(math.pi * p)
+                          pose = "land" if p < 0.08 else ("jump" if 0.12 < p < 0.88 else "stand")
+                          fr = base.copy()
+                          # soft shadow that shrinks while in the air
+                          sd = ImageDraw.Draw(fr)
+                          sw = (SW - 10) * (1 - 0.4 * lift / HOP_H)
+                          cx = x + SW / 2
+                          sd.ellipse([cx - sw / 2, ground - 2, cx + sw / 2, ground + 1], fill=t["shadow"])
+                          put(fr, poses[pose], x, round(ground - SH - lift))
+                          frames.append(fr)
+                  frames.extend([frames[-1]] * 18)       # short rest before turning around
+
+              run(False)
+              run(True)
+              # one shared palette for all frames (no flicker): grid + every capybara pose
+              sample = Image.new("RGB", (W, H + SH * 2 + 8), t["bg"])
+              sample.paste(frames[0], (0, 0))
+              for i, im in enumerate(list(POSES.values()) + list(POSES_L.values())):
+                  sample.paste(im, (i * (SW + 4), H + 4), im)
+                  sample.paste(im, (i * (SW + 4), H + SH + 6))   # also over plain bg edges
+              palimg = sample.quantize(colors=255, method=Image.Quantize.MEDIANCUT)
+              q = [f.quantize(palette=palimg, dither=Image.Dither.NONE) for f in frames]
+              q[0].save(out_gif, save_all=True, append_images=q[1:], duration=40, loop=0,
+                        optimize=False, disposal=1)
+
+          os.makedirs("dist", exist_ok=True)
+          weeks = fetch_weeks()
+          render(weeks, "light", "dist/github-contribution-grid.png", "dist/github-contribution-grid-capybara.gif")
+          render(weeks, "dark", "dist/github-contribution-grid-dark.png", "dist/github-contribution-grid-capybara-dark.gif")
+          print("ok", len(weeks), "weeks")
           PY
 
       - name: Push new files to the output branch
@@ -52,6 +184,6 @@ jobs:
         with:
           target_branch: output
           build_dir: dist
-          commit_message: Update snake animations
+          commit_message: Update contribution animations
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
