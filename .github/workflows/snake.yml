@@ -26,6 +26,27 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Static image of the grid, without the snake (first frame of the GIF)
+      - name: Build static grid without snake
+        run: |
+          sudo chown -R $(id -u) dist
+          pip install --quiet pillow
+          python3 - <<'PY'
+          from PIL import Image
+          im = Image.open("dist/github-contribution-grid-snake.gif"); im.seek(0)
+          im = im.convert("RGB"); px = im.load(); w, h = im.size
+          bg = px[w - 1, h - 1]
+          diff = lambda p: max(abs(a - b) for a, b in zip(p, bg)) > 12
+          rows = [y for y in range(h) if sum(diff(px[x, y]) for x in range(w)) > w * 0.5]
+          top, bottom = rows[0], rows[-1]
+          cols = [x for x in range(w) if any(diff(px[x, y]) for y in range(top, bottom + 1))]
+          grid = im.crop((cols[0], top, cols[-1] + 1, bottom + 1))
+          m = 6
+          out = Image.new("RGB", (grid.width + 2 * m, grid.height + 2 * m), bg)
+          out.paste(grid, (m, m))
+          out.save("dist/github-contribution-grid.png")
+          PY
+
       - name: Push new files to the output branch
         uses: crazy-max/ghaction-github-pages@v4
         with:
